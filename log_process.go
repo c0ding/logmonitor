@@ -1,4 +1,3 @@
-
 //https://github.com/itsmikej/imooc_logprocess
 package main
 
@@ -7,11 +6,20 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
+
+const (
+	TypeHandleLine = 0
+	TypeErrNum     = 1
+)
+
+var TypeMonitorChan = make(chan int, 200)
 
 type Message struct {
 	TimeLocal                    time.Time
@@ -25,7 +33,7 @@ type LogProcess struct {
 	write Writer
 
 	rc chan string
-	wc chan string
+	wc chan *Message
 }
 
 type Reader interface {
@@ -33,7 +41,7 @@ type Reader interface {
 }
 
 type Writer interface {
-	Write(wc chan string)
+	Write(wc chan *Message)
 }
 
 type ReadFile struct {
@@ -79,7 +87,7 @@ type WriteFile struct {
 	fileInfo string
 }
 
-func (w *WriteFile) Write(wc chan string) {
+func (w *WriteFile) Write(wc chan *Message) {
 	//写入模块
 
 	for v := range wc {
@@ -100,6 +108,9 @@ func (l *LogProcess) Process() {
 	//loc, _ := time.LoadLocation("Asia/Shanghai")
 
 	//1，从读取通道中 读取每行日志数据
+	//2，用正则表达，提取需要的数据，比如：path，status，Method
+	//3，将数据写入 写入通道
+
 	for v := range l.rc {
 		ret := rep.FindStringSubmatch(v)
 		if len(ret) != 14 {
@@ -108,16 +119,45 @@ func (l *LogProcess) Process() {
 		}
 
 		message := &Message{}
+		loc, _ := time.LoadLocation("Asia/Shanghai")
+		t, err := time.ParseInLocation("02/Jan/2006:15:04:05 +0000", ret[4], loc)
+		if err != nil {
+			TypeMonitorChan <- TypeErrNum
+			log.Println("ParseInLocation fail:", err.Error(), ret[4])
+			continue
+		}
+		message.TimeLocal = t
 
+		byteSent, _ := strconv.Atoi(ret[8])
+		message.BytesSent = byteSent
 
+		// GET /foo?query=t HTTP/1.0
+		reqSli := strings.Split(ret[6], " ")
+		if len(reqSli) != 3 {
+			TypeMonitorChan <- TypeErrNum
+			log.Println("strings.Split fail", ret[6])
+			continue
+		}
+		message.Method = reqSli[0]
 
-		message.TimeLocal =
+		u, err := url.Parse(reqSli[1])
+		if err != nil {
+			log.Println("url parse fail:", err)
+			TypeMonitorChan <- TypeErrNum
+			continue
+		}
+		message.Path = u.Path
 
-		l.wc <- strings.ToUpper(v)
+		message.Scheme = ret[5]
+		message.Status = ret[7]
+
+		upstreamTime, _ := strconv.ParseFloat(ret[12], 64)
+		requestTime, _ := strconv.ParseFloat(ret[13], 64)
+		message.UpstreamTime = upstreamTime
+		message.RequestTime = requestTime
+
+		l.wc <- message
 	}
-
-	//2，用正则表达，提取需要的数据，比如：path，status，Method
-	//3，将数据写入 写入通道
 
 }
 
@@ -139,7 +179,7 @@ func main() {
 	LogPro = &LogProcess{
 		write: w,
 		read:  r,
-		wc:    make(chan string),
+		wc:    make(chan *Message),
 		rc:    make(chan string),
 	}
 
